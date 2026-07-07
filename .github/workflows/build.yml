@@ -33,6 +33,29 @@ jobs:
         working-directory: kernel
         run: |
           set -eux
+          python3 - <<'PY'
+from pathlib import Path
+for kconfig in Path('.').rglob('Kconfig'):
+    try:
+        lines = kconfig.read_text(errors='ignore').splitlines()
+    except Exception:
+        continue
+    changed = False
+    out = []
+    for line in lines:
+        s = line.strip()
+        if s.startswith('source ') or s.startswith('osource '):
+            parts = s.split(None, 1)
+            if len(parts) == 2:
+                target = parts[1].strip().strip('"')
+                if target and not Path(target).exists():
+                    print(f'remove missing Kconfig source: {target} from {kconfig}')
+                    changed = True
+                    continue
+        out.append(line)
+    if changed:
+        kconfig.write_text('\n'.join(out) + '\n')
+PY
           if [ ! -d drivers/misc/hwid ]; then
             sed -i '/hwid/d;/MI_HARDWARE_ID/d' drivers/misc/Kconfig drivers/misc/Makefile arch/arm64/configs/vendor/diting_GKI.config || true
             printf '\n# CONFIG_MI_HARDWARE_ID is not set\n' >> arch/arm64/configs/vendor/diting_GKI.config
