@@ -1,0 +1,83 @@
+name: Build Diting Droidspaces Kernel
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    env:
+      ARCH: arm64
+      SUBARCH: arm64
+      SOURCE_REPO: https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git
+      SOURCE_BRANCH: bsp-diting-s-oss
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y git bc bison flex make python3 python-is-python3 build-essential libssl-dev libelf-dev dwarves cpio unzip zip rsync curl wget xz-utils zstd lz4 device-tree-compiler gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
+
+      - name: Clone source
+        run: |
+          git clone --depth=1 --single-branch -b "$SOURCE_BRANCH" "$SOURCE_REPO" kernel
+          git -C kernel log -1 --oneline
+
+      - name: Install clang
+        run: |
+          git clone --depth=1 https://gitlab.com/LeCmnGend/proton-clang.git toolchains/proton-clang
+          echo "$GITHUB_WORKSPACE/toolchains/proton-clang/bin" >> "$GITHUB_PATH"
+          clang --version
+
+      - name: Patch configs
+        working-directory: kernel
+        run: |
+          set -eux
+          if [ ! -d drivers/misc/hwid ]; then
+            sed -i '/hwid/d;/MI_HARDWARE_ID/d' drivers/misc/Kconfig drivers/misc/Makefile arch/arm64/configs/vendor/diting_GKI.config || true
+            printf '\n# CONFIG_MI_HARDWARE_ID is not set\n' >> arch/arm64/configs/vendor/diting_GKI.config
+          fi
+          if [ ! -d drivers/staging/binder_prio ]; then
+            sed -i '/binder_prio/d;/BINDER_PRIO/d' drivers/staging/Kconfig drivers/staging/Makefile arch/arm64/configs/vendor/diting_GKI.config || true
+            printf '\n# CONFIG_BINDER_PRIO is not set\n' >> arch/arm64/configs/vendor/diting_GKI.config
+          fi
+          printf '\nCONFIG_SYSVIPC=y\nCONFIG_POSIX_MQUEUE=y\nCONFIG_PID_NS=y\nCONFIG_IPC_NS=y\nCONFIG_CHECKPOINT_RESTORE=y\n' >> arch/arm64/configs/vendor/diting_GKI.config
+
+      - name: Prepare config
+        working-directory: kernel
+        run: |
+          set -eux
+          mkdir -p out
+          make O=out ARCH=arm64 gki_defconfig
+          scripts/kconfig/merge_config.sh -O out -m -r out/.config arch/arm64/configs/vendor/diting_GKI.config arch/arm64/configs/vendor/diting_consolidate.config
+          make O=out ARCH=arm64 olddefconfig
+          grep -E 'CONFIG_(SYSVIPC|POSIX_MQUEUE|NAMESPACES|UTS_NS|USER_NS|PID_NS|NET_NS|IPC_NS|CHECKPOINT_RESTORE)=' out/.config || true
+          grep '^CONFIG_SYSVIPC=y' out/.config
+          grep '^CONFIG_POSIX_MQUEUE=y' out/.config
+          grep '^CONFIG_PID_NS=y' out/.config
+          grep '^CONFIG_IPC_NS=y' out/.config
+
+      - name: Build Image
+        working-directory: kernel
+        run: |
+          set -o pipefail
+          make -j"$(nproc)" O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- Image 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+
+      - name: Collect artifacts
+        if: always()
+        run: |
+          mkdir -p release
+          cp -f kernel/out/.config release/kernel_config.txt 2>/dev/null || true
+          cp -f kernel/out/arch/arm64/boot/Image release/Image 2>/dev/null || true
+          cp -f build.log release/build.log 2>/dev/null || true
+          echo device=diting > release/build-info.txt
+          sha256sum release/* > release/SHA256SUMS.txt 2>/dev/null || true
+          ls -lh release
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diting-droidspaces-kernel
+          path: release/*
+          if-no-files-found: warn
